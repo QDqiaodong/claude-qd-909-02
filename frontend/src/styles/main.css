@@ -1,0 +1,361 @@
+/* =====================================================================
+   水库灌区 · 渠系闸门与灌溉调度管理
+   主色 #0288d1（亮天蓝）
+   页面没有顶部菜单栏，导航是左侧一列「阶梯梯形块」：斜切色块层层递进，
+   选中的那块向右突出并加深。
+   ===================================================================== */
+
+:root {
+  /* 主色：亮天蓝 */
+  --primary: #0288d1;
+  --primary-deep: #01579b;
+  --primary-soft: #4fc3f7;
+  --primary-wash: #e1f5fe;
+
+  /* 三级渠系用色（与后端 Dict.CANAL_GRADE_COLOR 一致） */
+  --trunk: #01579b;   /* 干渠 */
+  --branch: #0288d1;  /* 支渠 */
+  --lateral: #4fc3f7; /* 斗渠 */
+
+  --safe: #43a047;    /* 安全区 / 平稳 */
+  --warn: #f9a825;    /* 预警 / 岁修 */
+  --danger: #e53935;  /* 越界 / 骤变 */
+  --dead: #90a4ae;    /* 停用 / 取消 */
+
+  --ink: #10304a;
+  --ink-soft: #4a6b83;
+  --ink-dim: #8aa6b8;
+
+  --bg: #f2f9fd;
+  --panel: #ffffff;
+  --line: #dbeef9;
+  --line-strong: #bcdff1;
+
+  /* Element Plus 主题色跟着改 */
+  --el-color-primary: #0288d1;
+  --el-color-primary-light-3: #4eb5e6;
+  --el-color-primary-light-5: #79c8ec;
+  --el-color-primary-light-7: #a5dbf2;
+  --el-color-primary-light-8: #bde4f6;
+  --el-color-primary-light-9: #e1f3fb;
+  --el-color-primary-dark-2: #026da7;
+  --el-color-success: #43a047;
+  --el-color-warning: #f9a825;
+  --el-color-danger: #e53935;
+  --el-color-error: #e53935;
+  --el-text-color-primary: var(--ink);
+  --el-text-color-regular: var(--ink-soft);
+  --el-border-color: var(--line-strong);
+  --el-border-color-light: var(--line);
+  --el-border-radius-base: 8px;
+  --el-font-size-base: 13px;
+}
+
+* { box-sizing: border-box; }
+
+html, body, #app {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+}
+
+body {
+  font-family: 'PingFang SC', 'Microsoft YaHei', 'Helvetica Neue', Arial, sans-serif;
+  color: var(--ink);
+  background: var(--bg);
+  font-size: 13px;
+}
+
+/* ---------------- 外壳：品牌条 +（阶梯导航 + 内容） ---------------- */
+.app-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  background:
+    radial-gradient(900px 420px at 3% -8%, rgba(2, 136, 209, 0.16), rgba(2, 136, 209, 0) 62%),
+    radial-gradient(760px 400px at 97% 6%, rgba(79, 195, 247, 0.16), rgba(79, 195, 247, 0) 60%),
+    var(--bg);
+}
+
+/* 品牌条：只有标题和概览数字，不是导航 */
+.app-brand {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 10px 18px;
+  background: linear-gradient(100deg, #01579b 0%, var(--primary) 48%, #4fc3f7 100%);
+  color: #fff;
+  box-shadow: 0 6px 18px rgba(1, 87, 155, 0.26);
+}
+
+.brand-mark {
+  width: 38px;
+  height: 38px;
+  border-radius: 10px;
+  display: grid;
+  place-items: center;
+  background: rgba(255, 255, 255, 0.18);
+  border: 1px solid rgba(255, 255, 255, 0.42);
+  font-size: 18px;
+  font-weight: 800;
+}
+
+.brand-title { font-size: 17px; font-weight: 800; letter-spacing: 0.6px; }
+.brand-sub { font-size: 11.5px; opacity: 0.85; margin-top: 2px; letter-spacing: 0.4px; }
+
+.top-stats { margin-left: auto; display: flex; gap: 8px; flex-wrap: wrap; }
+.top-stat {
+  min-width: 84px;
+  padding: 6px 12px;
+  border-radius: 9px;
+  background: rgba(255, 255, 255, 0.16);
+  border: 1px solid rgba(255, 255, 255, 0.28);
+}
+.top-stat b { display: block; font-size: 16px; line-height: 1.2; }
+.top-stat span { font-size: 11px; opacity: 0.85; }
+
+/* ---------------- 主体 ---------------- */
+.app-body {
+  flex: 1 1 auto;
+  display: flex;
+  gap: 14px;
+  min-height: 0;
+  padding: 12px 14px 14px;
+}
+
+/* ============ 左侧「阶梯梯形块」导航（本仓唯一导航） ============ */
+.stair-nav {
+  flex: 0 0 246px;
+  align-self: flex-start;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding: 12px 8px 16px 0;
+}
+
+.stair-caption {
+  font-size: 10.5px;
+  letter-spacing: 2.4px;
+  color: var(--ink-dim);
+  padding: 2px 4px 12px 6px;
+  text-transform: uppercase;
+}
+
+.stair-item {
+  /* --i 由行内样式给出：第几层，越往下越往右错开，形成阶梯 */
+  position: relative;
+  height: 78px;
+  margin-left: calc(var(--i) * 16px);
+  margin-bottom: 10px;
+  padding: 0 22px 0 18px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  cursor: pointer;
+  color: #fff;
+  /* 斜切：左边竖直、右边斜切，做出梯形 */
+  clip-path: polygon(0 0, 100% 0, calc(100% - 22px) 100%, 0 100%);
+  background: linear-gradient(110deg, #4eb5e6 0%, #29a3dc 100%);
+  box-shadow: 0 6px 14px rgba(1, 87, 155, 0.18);
+  transition: margin-left .24s ease, background .24s ease, transform .24s ease,
+              box-shadow .24s ease, filter .24s ease;
+}
+
+/* 未选中：淡一点，让选中的那块跳出来 */
+.stair-item:not(.on) { filter: saturate(0.72) brightness(1.06); }
+
+.stair-item:hover {
+  background: linear-gradient(110deg, #29a3dc 0%, var(--primary) 100%);
+  filter: none;
+}
+
+/* 选中：向右突出 + 加深 */
+.stair-item.on {
+  margin-left: calc(var(--i) * 16px + 20px);
+  background: linear-gradient(110deg, #01579b 0%, var(--primary) 62%, #0277bd 100%);
+  box-shadow: 0 12px 24px rgba(1, 87, 155, 0.34);
+  filter: none;
+  z-index: 2;
+}
+
+/* 选中块右侧的斜切尖角，强化「往外顶」的感觉 */
+.stair-item.on::after {
+  content: '';
+  position: absolute;
+  right: 0;
+  top: 0;
+  bottom: 0;
+  width: 6px;
+  background: #01579b;
+  clip-path: polygon(0 0, 100% 0, 22px 100%, 0 100%);
+}
+
+.stair-index {
+  flex: 0 0 auto;
+  width: 24px;
+  height: 24px;
+  line-height: 24px;
+  text-align: center;
+  border-radius: 7px;
+  font-size: 12px;
+  font-weight: 800;
+  color: #01579b;
+  background: rgba(255, 255, 255, 0.86);
+}
+
+.stair-text { flex: 1 1 auto; min-width: 0; }
+
+.stair-name {
+  display: block;
+  font-size: 14px;
+  font-weight: 800;
+  letter-spacing: 0.6px;
+  white-space: nowrap;
+}
+
+.stair-desc {
+  display: block;
+  font-size: 10.5px;
+  opacity: 0.86;
+  margin-top: 3px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------------- 内容区 ---------------- */
+.app-content {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-y: auto;
+  overflow-x: hidden;
+  padding-right: 4px;
+}
+
+.view-head { display: flex; align-items: baseline; gap: 10px; margin-bottom: 10px; }
+.view-title { font-size: 16px; font-weight: 800; color: var(--primary-deep); }
+.view-tip { font-size: 11.5px; color: var(--ink-dim); }
+
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--line-strong);
+  border-radius: 12px;
+  padding: 12px 14px;
+  box-shadow: 0 6px 18px rgba(1, 87, 155, 0.07);
+}
+.panel + .panel { margin-top: 12px; }
+
+.panel-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--ink);
+  margin-bottom: 10px;
+}
+.panel-title::before {
+  content: '';
+  width: 3px;
+  height: 13px;
+  border-radius: 2px;
+  background: linear-gradient(180deg, var(--primary-soft), var(--primary));
+}
+
+.grid-2 { display: grid; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr); gap: 12px; align-items: start; }
+.grid-3 { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; align-items: start; }
+
+/* 筛选 chip 行 */
+.chip-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 10px; }
+.chip {
+  padding: 5px 12px;
+  border-radius: 999px;
+  font-size: 12px;
+  cursor: pointer;
+  color: var(--ink-soft);
+  background: #fff;
+  border: 1px solid var(--line-strong);
+  user-select: none;
+  transition: all .18s ease;
+}
+.chip:hover { border-color: var(--primary-soft); color: var(--primary-deep); }
+.chip.on {
+  color: #fff;
+  font-weight: 700;
+  background: linear-gradient(120deg, var(--primary), var(--primary-soft));
+  border-color: var(--primary);
+  box-shadow: 0 4px 12px rgba(2, 136, 209, 0.30);
+}
+
+.mini-card {
+  padding: 10px 12px;
+  border-radius: 10px;
+  background: var(--primary-wash);
+  border: 1px solid var(--line);
+}
+.mini-card .k { font-size: 11px; color: var(--ink-dim); }
+.mini-card .v { font-size: 18px; font-weight: 800; color: var(--primary-deep); margin-top: 2px; }
+
+.tag-line {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 2px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: #eaf6fc;
+  color: var(--ink-soft);
+}
+.dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; }
+
+/* 派生列标记：一眼看出是值对象算出来的、不是表里字段 */
+.derived {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 1px 6px;
+  border-radius: 5px;
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #01579b;
+  background: #e1f5fe;
+  border: 1px dashed var(--primary);
+}
+.derived::before { content: 'ƒ'; font-style: italic; font-weight: 900; }
+
+.empty-tip { padding: 22px; text-align: center; color: var(--ink-dim); font-size: 12px; }
+
+/* ---------------- Element Plus 轻改造 ---------------- */
+.el-table {
+  --el-table-header-bg-color: var(--primary-wash);
+  --el-table-header-text-color: var(--primary-deep);
+  --el-table-border-color: var(--line);
+  --el-table-row-hover-bg-color: #f4fbff;
+  font-size: 12.5px;
+}
+.el-table th.el-table__cell { font-weight: 700 !important; }
+
+.el-button--primary {
+  background: linear-gradient(120deg, var(--primary), var(--primary-soft)) !important;
+  border: none !important;
+  box-shadow: 0 4px 12px rgba(2, 136, 209, 0.26);
+}
+.el-button.is-plain { background: #fff !important; }
+
+.el-tag { border-radius: 6px !important; }
+.el-dialog__header { border-bottom: 1px solid var(--line); margin-right: 0 !important; }
+.el-dialog__body { padding-top: 14px; }
+.el-form-item { margin-bottom: 14px; }
+.el-descriptions__label { color: var(--ink-dim) !important; }
+.el-progress__text { font-size: 12px !important; }
+.el-slider__runway { background-color: #e3f2fd !important; }
+
+/* 滚动条 */
+::-webkit-scrollbar { width: 8px; height: 8px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #b9dff3; border-radius: 8px; }
+::-webkit-scrollbar-thumb:hover { background: #8ccbea; }
+
+.fade-enter-active, .fade-leave-active { transition: opacity .2s ease; }
+.fade-enter-from, .fade-leave-to { opacity: 0; }
