@@ -18,6 +18,8 @@ import com.reservoir.irri.repository.IrrigationPlanRepository;
 import com.reservoir.irri.repository.OutageAvoidItemRepository;
 import com.reservoir.irri.repository.OutageWindowRepository;
 import com.reservoir.irri.repository.WaterRequestRepository;
+import jakarta.persistence.EntityManager;
+import jakarta.persistence.LockModeType;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -26,7 +28,6 @@ import java.time.LocalTime;
 import java.time.format.DateTimeFormatter;
 import java.time.temporal.ChronoUnit;
 import java.util.ArrayList;
-import java.util.HashMap;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
@@ -67,11 +68,13 @@ public class OutageService {
     private final WaterRequestRepository requestRepository;
     private final CanalSegmentRepository segmentRepository;
     private final CanalService canalService;
+    private final QuotaService quotaService;
+    private final EntityManager entityManager;
 
     public OutageService(OutageWindowRepository windowRepository, OutageAvoidItemRepository itemRepository,
                          IrrigationPlanRepository planRepository, AllotmentRepository allotmentRepository,
                          WaterRequestRepository requestRepository, CanalSegmentRepository segmentRepository,
-                         CanalService canalService) {
+                         CanalService canalService, QuotaService quotaService, EntityManager entityManager) {
         this.windowRepository = windowRepository;
         this.itemRepository = itemRepository;
         this.planRepository = planRepository;
@@ -79,6 +82,8 @@ public class OutageService {
         this.requestRepository = requestRepository;
         this.segmentRepository = segmentRepository;
         this.canalService = canalService;
+        this.quotaService = quotaService;
+        this.entityManager = entityManager;
     }
 
     // ---------------- 查询 ----------------
@@ -312,9 +317,10 @@ public class OutageService {
         if (shift <= 0) {
             throw new BizException("计划起点已在窗口结束之后，无需顺延");
         }
-        // 预检：整体平移后各目标日的流量合计不得超设计流量
+        // 预检：锁定原日期与目标日期额度桶，整体平移后各目标日仍须容纳配水和已批申请
         List<Allotment> actives = activeAllotments(plan.getId());
-        assertBatchCapacity(actives, shift);
+        List<WaterRequest> movableRequests =
+                assertBatchCapacityLocked(actives, shift, plan.getCanalSegmentId(), days[0], days[1]);
 
         LocalDate oldStart = plan.getStartDate();
         LocalDate oldEnd = plan.getEndDate();
@@ -333,15 +339,18 @@ public class OutageService {
             // 同窗口下该配水条的待避让项随计划一并了结；历史已完成 / 已取消的配水保持原日期
             autoResolveAllotItem(window, a, "POSTPONED", "随计划整体顺延至 " + a.getAllotDate(), operator);
         }
-        // 同步相关用水申请的供水日期：窗口覆盖日整体平移
-        int movedReqs = moveRequestsBetween(plan.getCanalSegmentId(), days[0], days[1], shift);
+        // 同步已锁定的相关用水申请的供水日期；已批预占流水同步改期
+        List<WaterRequest> movedReqs = moveLockedRequestsBetween(
+                movableRequests, plan.getCanalSegmentId(), days[0], days[1], shift);
+        int movedReqCount = movedReqs.size();
+        lockPlan(plan);
 
         item.setStatus("POSTPONED");
         item.setNewStartDate(plan.getStartDate());
         item.setNewEndDate(plan.getEndDate());
         item.setResolutionNote("整体顺延 " + shift + " 天：" + oldStart + "~" + oldEnd + " → "
                 + plan.getStartDate() + "~" + plan.getEndDate()
-                + "；同步配水 " + movedAllots + " 条、用水申请 " + movedReqs + " 张；历史已完成配水保持原日期");
+                + "；同步配水 " + movedAllots + " 条、用水申请 " + movedReqCount + " 张；历史已完成配水保持原日期");
         item.setOperator(operator);
         item.setResolvedAt(LocalDateTime.now());
         itemRepository.save(item);
@@ -378,7 +387,9 @@ public class OutageService {
         List<Allotment> tail = activeAllotments(plan.getId()).stream()
                 .filter(a -> a.getAllotDate() != null && !a.getAllotDate().isBefore(ws))
                 .collect(Collectors.toList());
-        assertBatchCapacity(tail, shift);
+        List<WaterRequest> movableRequests =
+                assertBatchCapacityLocked(tail, shift, plan.getCanalSegmentId(), ws, oldEnd);
+        lockPlan(plan);
 
         IrrigationPlan later = new IrrigationPlan();
         later.setPlanCode(uniquePlanCode(plan.getPlanCode()));
@@ -411,8 +422,10 @@ public class OutageService {
             moved++;
             autoResolveAllotItem(window, a, "SPLIT", "随计划拆分至 " + later.getPlanCode() + " " + a.getAllotDate(), operator);
         }
-        // 同步相关用水申请：窗口起始日及之后（原计划周期内）的供水日期一并平移
-        int movedReqs = moveRequestsBetween(plan.getCanalSegmentId(), ws, oldEnd, shift);
+        // 同步相关用水申请：窗口起始日及之后（原计划周期内）的供水日期一并平移，已批预占同步改期
+        List<WaterRequest> movedReqs = moveLockedRequestsBetween(
+                movableRequests, plan.getCanalSegmentId(), ws, oldEnd, shift);
+        int movedReqCount = movedReqs.size();
 
         item.setStatus("SPLIT");
         item.setSplitPlanId(later.getId());
@@ -420,7 +433,7 @@ public class OutageService {
         item.setNewEndDate(later.getEndDate());
         item.setResolutionNote("拆分避让：原计划保留 " + oldStart + "~" + beforeEnd + "，后段平移 " + shift
                 + " 天生成 " + later.getPlanCode() + "（" + newStart + "~" + newEnd + "）"
-                + "；同步配水 " + moved + " 条、用水申请 " + movedReqs + " 张");
+                + "；同步配水 " + moved + " 条、用水申请 " + movedReqCount + " 张");
         item.setOperator(operator);
         item.setResolvedAt(LocalDateTime.now());
         itemRepository.save(item);
@@ -470,8 +483,22 @@ public class OutageService {
         if (newDate.equals(a.getAllotDate())) {
             throw new BizException("目标日期与原配水日期相同，无需调整");
         }
-        assertCapacity(a.getCanalSegmentId(), newDate, a.getFlow(), a.getId());
+        quotaService.lockBuckets(Set.of(
+                QuotaService.BucketKey.of(a.getCanalSegmentId(), a.getAllotDate()),
+                QuotaService.BucketKey.of(a.getCanalSegmentId(), newDate)));
+        quotaService.lockAllotment(a);
         LocalDate oldDate = a.getAllotDate();
+        if (!ALLOT_ACTIVE.contains(a.getStatus())) {
+            throw new BizException("配水已" + Dict.allotStatusName(a.getStatus()) + "，无需避让");
+        }
+        if (newDate.equals(oldDate)) {
+            throw new BizException("目标日期与当前配水日期相同，无需调整");
+        }
+        List<WaterRequest> movableRequests = requestRepository.findMovableOn(a.getCanalSegmentId(), oldDate);
+        quotaService.lockRequests(movableRequests);
+        assertCapacity(a.getCanalSegmentId(), newDate, a.getFlow(), a.getId(),
+                sumMovingRequestVolume(movableRequests),
+                movableRequests.stream().map(WaterRequest::getId).collect(Collectors.toList()));
         a.setAllotDate(newDate);
         allotmentRepository.save(a);
         // 同步计划周期：目标日期超出原计划周期时顺延计划边界（剩余水量随周期重算）
@@ -494,12 +521,13 @@ public class OutageService {
                 planSync = "；计划周期同步为 " + plan.getStartDate() + "~" + plan.getEndDate();
             }
         }
-        // 同步相关用水申请的供水日期
-        int movedReqs = moveRequestsOn(a.getCanalSegmentId(), oldDate, newDate);
+        // 同步已锁定的相关用水申请，已批预占流水同步改期
+        List<WaterRequest> movedReqs = moveLockedRequestsOn(movableRequests, a.getCanalSegmentId(), oldDate, newDate);
+        int movedReqCount = movedReqs.size();
 
         item.setStatus(status);
         item.setNewStartDate(newDate);
-        item.setResolutionNote(label + "（原 " + oldDate + "）" + planSync + "；同步用水申请 " + movedReqs + " 张");
+        item.setResolutionNote(label + "（原 " + oldDate + "）" + planSync + "；同步用水申请 " + movedReqCount + " 张");
         item.setOperator(operator);
         item.setResolvedAt(LocalDateTime.now());
         itemRepository.save(item);
@@ -695,102 +723,134 @@ public class OutageService {
 
     // ---------------- 联动：用水申请供水日期 / 容量与周期 ----------------
 
-    /** 某渠段某日的可改期用水申请（待审 / 已批）整体改到新日期；已供水、已驳回为终态不动 */
-    private int moveRequestsOn(Long segmentId, LocalDate from, LocalDate to) {
+    /** 已在额度桶锁内锁定的同日申请整体改到新日期；已供水、已驳回为终态不动。 */
+    private List<WaterRequest> moveLockedRequestsOn(List<WaterRequest> lockedRequests,
+                                                    Long segmentId, LocalDate from, LocalDate to) {
         if (from == null || from.equals(to)) {
-            return 0;
+            return List.of();
         }
-        List<WaterRequest> list = requestRepository.findMovableOn(segmentId, from);
+        List<WaterRequest> list = lockedRequests.stream()
+                .filter(r -> segmentId.equals(r.getCanalSegmentId()) && from.equals(r.getAllotDate()))
+                .collect(Collectors.toList());
         for (WaterRequest r : list) {
             r.setAllotDate(to);
         }
         requestRepository.saveAll(list);
-        return list.size();
+        quotaService.rebaseActiveHolds(list, segmentId, to);
+        return list;
     }
 
-    /** 某渠段日期区间内的可改期用水申请整体平移 shift 天 */
-    private int moveRequestsBetween(Long segmentId, LocalDate from, LocalDate to, long shift) {
+    /** 已在额度桶锁内锁定的区间申请整体平移 shift 天。 */
+    private List<WaterRequest> moveLockedRequestsBetween(List<WaterRequest> lockedRequests,
+                                                         Long segmentId, LocalDate from,
+                                                         LocalDate to, long shift) {
         if (from == null || to == null || shift == 0) {
-            return 0;
+            return List.of();
         }
-        List<WaterRequest> list = requestRepository.findMovableBetween(segmentId, from, to);
+        List<WaterRequest> list = lockedRequests.stream()
+                .filter(r -> segmentId.equals(r.getCanalSegmentId())
+                        && r.getAllotDate() != null
+                        && !r.getAllotDate().isBefore(from)
+                        && !r.getAllotDate().isAfter(to))
+                .collect(Collectors.toList());
         for (WaterRequest r : list) {
             r.setAllotDate(r.getAllotDate().plusDays(shift));
         }
         requestRepository.saveAll(list);
-        return list.size();
+        // 同一张申请可能按其新日期归桶；逐张 rebase 以保留正确审计日期
+        java.util.Map<LocalDate, List<WaterRequest>> byDay = list.stream()
+                .collect(Collectors.groupingBy(WaterRequest::getAllotDate));
+        byDay.forEach((day, requests) -> quotaService.rebaseActiveHolds(requests, segmentId, day));
+        return list;
     }
 
-    /** 与 PlanService 同口径：同一渠段同一配水日流量合计不得超过设计流量 */
-    private void assertCapacity(Long segmentId, LocalDate day, BigDecimal flow, Long selfId) {
+    /** 与 PlanService 同口径：调用前必须锁定目标「渠段 + 日期」额度桶。 */
+    private void assertCapacity(Long segmentId, LocalDate day, BigDecimal flow, Long selfId,
+                                BigDecimal shiftedRequestVolume, List<Long> movingRequestIds) {
         CanalSegment segment = segmentRepository.findById(segmentId).orElse(null);
-        if (segment == null || day == null) {
-            return;
-        }
-        BigDecimal design = CanalService.nvl(segment.getDesignFlow());
-        if (design.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BizException("渠段 " + segment.getSegmentCode() + " 未设置设计流量，不能避让到该日");
-        }
-        BigDecimal used = BigDecimal.ZERO;
-        for (Allotment other : allotmentRepository.findActiveBySegmentAndDate(segmentId, day)) {
-            if (selfId != null && selfId.equals(other.getId())) {
-                continue;
-            }
-            used = used.add(CanalService.nvl(other.getFlow()));
-        }
-        if (used.add(CanalService.nvl(flow)).compareTo(design) > 0) {
-            throw new BizException("避让失败：渠段 " + segment.getSegmentCode() + " " + day + " 已排 "
-                    + used.setScale(2, RoundingMode.HALF_UP) + " m³/s，再排 " + flow
-                    + " m³/s 将超设计流量 " + design + " m³/s，请改用拆分改期另选日期");
-        }
+        quotaService.assertAllotmentFitsLocked(segment, day, flow, shiftedRequestVolume, selfId, movingRequestIds);
     }
 
-    /** 批量平移预检：按「渠段 + 目标日」汇总本批次流量，与该日既有配水合计比对设计流量 */
-    private void assertBatchCapacity(List<Allotment> moving, long shiftDays) {
-        Map<String, BigDecimal> batchFlow = new LinkedHashMap<>();
-        Map<String, Long> batchSegment = new HashMap<>();
-        Map<String, LocalDate> batchDay = new HashMap<>();
+    /**
+     * 批量平移预检：锁定原 / 目标「渠段 + 日期」额度桶。按目标日汇总本批次流量 / 水量，
+     * 并在同一数据库串行点内复核已排配水与已批申请预占。
+     */
+    private List<WaterRequest> assertBatchCapacityLocked(List<Allotment> moving, long shiftDays, Long segmentId,
+                                                         LocalDate requestFrom, LocalDate requestTo) {
+        Map<QuotaService.BucketKey, BigDecimal> batchFlow = new LinkedHashMap<>();
+        Map<QuotaService.BucketKey, BigDecimal> movingRequestVolume = new LinkedHashMap<>();
         Set<Long> ids = moving.stream().map(Allotment::getId).collect(Collectors.toSet());
+        Set<QuotaService.BucketKey> lockKeys = new java.util.LinkedHashSet<>();
         for (Allotment a : moving) {
             if (a.getAllotDate() == null) {
                 continue;
             }
             LocalDate target = a.getAllotDate().plusDays(shiftDays);
-            String key = a.getCanalSegmentId() + "#" + target;
-            batchFlow.merge(key, CanalService.nvl(a.getFlow()), BigDecimal::add);
-            batchSegment.put(key, a.getCanalSegmentId());
-            batchDay.put(key, target);
+            QuotaService.BucketKey targetKey = QuotaService.BucketKey.of(a.getCanalSegmentId(), target);
+            batchFlow.merge(targetKey, CanalService.nvl(a.getFlow()), BigDecimal::add);
+            lockKeys.add(QuotaService.BucketKey.of(a.getCanalSegmentId(), a.getAllotDate()));
+            lockKeys.add(targetKey);
         }
-        for (Map.Entry<String, BigDecimal> entry : batchFlow.entrySet()) {
-            Long segmentId = batchSegment.get(entry.getKey());
-            LocalDate day = batchDay.get(entry.getKey());
-            CanalSegment segment = segmentRepository.findById(segmentId).orElse(null);
-            if (segment == null) {
+        // 可改期的待审 / 已批申请会随避让移动；锁覆盖原区间与目标区间，防止移动期间并发审批
+        if (segmentId != null && requestFrom != null && requestTo != null && shiftDays != 0) {
+            LocalDate cursor = requestFrom;
+            while (!cursor.isAfter(requestTo)) {
+                lockKeys.add(QuotaService.BucketKey.of(segmentId, cursor));
+                lockKeys.add(QuotaService.BucketKey.of(segmentId, cursor.plusDays(shiftDays)));
+                cursor = cursor.plusDays(1);
+            }
+        }
+        quotaService.lockBuckets(lockKeys);
+        quotaService.lockAllotments(moving);
+        List<WaterRequest> oldRequests = requestRepository.findMovableBetween(segmentId, requestFrom, requestTo);
+        List<WaterRequest> targetRequests = requestRepository.findMovableBetween(
+                segmentId, requestFrom.plusDays(shiftDays), requestTo.plusDays(shiftDays));
+        Map<Long, WaterRequest> requestMap = new LinkedHashMap<>();
+        for (WaterRequest request : targetRequests) {
+            requestMap.put(request.getId(), request);
+        }
+        for (WaterRequest request : oldRequests) {
+            requestMap.putIfAbsent(request.getId(), request);
+        }
+        List<WaterRequest> movableRequests = new ArrayList<>(requestMap.values());
+        quotaService.lockRequests(movableRequests);
+        Set<Long> oldRequestIds = oldRequests.stream().map(WaterRequest::getId).collect(Collectors.toSet());
+        List<Long> movingRequestIds = new ArrayList<>(oldRequestIds);
+        for (WaterRequest request : movableRequests) {
+            if (!"APPROVED".equals(request.getStatus()) || !oldRequestIds.contains(request.getId())) {
                 continue;
             }
-            BigDecimal design = CanalService.nvl(segment.getDesignFlow());
-            if (design.compareTo(BigDecimal.ZERO) <= 0) {
-                throw new BizException("渠段 " + segment.getSegmentCode() + " 未设置设计流量，不能避让到 " + day);
-            }
-            BigDecimal used = BigDecimal.ZERO;
-            for (Allotment other : allotmentRepository.findActiveBySegmentAndDate(segmentId, day)) {
-                if (ids.contains(other.getId())) {
-                    continue;
-                }
-                used = used.add(CanalService.nvl(other.getFlow()));
-            }
-            if (used.add(entry.getValue()).compareTo(design) > 0) {
-                throw new BizException("避让失败：渠段 " + segment.getSegmentCode() + " " + day + " 平移后流量合计 "
-                        + used.add(entry.getValue()).setScale(2, RoundingMode.HALF_UP)
-                        + " m³/s 将超设计流量 " + design + " m³/s，请改用拆分改期");
+            QuotaService.BucketKey targetKey = QuotaService.BucketKey.of(
+                    request.getCanalSegmentId(), request.getAllotDate().plusDays(shiftDays));
+            movingRequestVolume.merge(targetKey, CanalService.nvl(request.getRequestVolume()), BigDecimal::add);
+        }
+        for (Allotment a : moving) {
+            if (!ALLOT_ACTIVE.contains(a.getStatus())) {
+                throw new BizException("配水已" + Dict.allotStatusName(a.getStatus()) + "，请刷新后重新处理避让");
             }
         }
+        quotaService.assertBatchAllotmentFitsLocked(batchFlow, movingRequestVolume, movingRequestIds, ids);
+        return oldRequests;
     }
 
     private List<Allotment> activeAllotments(Long planId) {
         return allotmentRepository.findByPlanIdOrderByAllotDateAsc(planId).stream()
                 .filter(a -> ALLOT_ACTIVE.contains(a.getStatus()))
                 .collect(Collectors.toList());
+    }
+
+    private BigDecimal sumMovingRequestVolume(List<WaterRequest> requests) {
+        return requests.stream()
+                .filter(r -> "APPROVED".equals(r.getStatus()))
+                .map(r -> CanalService.nvl(r.getRequestVolume()))
+                .reduce(BigDecimal.ZERO, BigDecimal::add);
+    }
+
+    private void lockPlan(IrrigationPlan plan) {
+        entityManager.refresh(plan, LockModeType.PESSIMISTIC_WRITE);
+        if (!PLAN_ACTIVE.contains(plan.getStatus())) {
+            throw new BizException("计划已结束，无需避让");
+        }
     }
 
     // ---------------- 小工具 ----------------

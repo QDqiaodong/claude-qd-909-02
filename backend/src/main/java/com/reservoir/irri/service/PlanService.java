@@ -51,15 +51,17 @@ public class PlanService {
     private final CanalSegmentRepository segmentRepository;
     private final CanalService canalService;
     private final OutageService outageService;
+    private final QuotaService quotaService;
 
     public PlanService(IrrigationPlanRepository planRepository, AllotmentRepository allotmentRepository,
                        CanalSegmentRepository segmentRepository, CanalService canalService,
-                       OutageService outageService) {
+                       OutageService outageService, QuotaService quotaService) {
         this.planRepository = planRepository;
         this.allotmentRepository = allotmentRepository;
         this.segmentRepository = segmentRepository;
         this.canalService = canalService;
         this.outageService = outageService;
+        this.quotaService = quotaService;
     }
 
     // ---------------- 查询 ----------------
@@ -174,11 +176,20 @@ public class PlanService {
                     allotmentRepository.sumFlowBySegmentAndDate(load.getCanalSegmentId(), day));
             load.setTotalFlow(total.setScale(2, RoundingMode.HALF_UP));
             BigDecimal design = CanalService.nvl(load.getDesignFlow());
+            BigDecimal dayCapacity = design.multiply(Dict.DAY_FLOW_TO_VOLUME);
+            load.setDayCapacity(dayCapacity);
+            BigDecimal reservedFlow = quotaService.reservedVolume(load.getCanalSegmentId(), day)
+                    .divide(Dict.DAY_FLOW_TO_VOLUME, 4, RoundingMode.HALF_UP);
+            load.setReservedFlow(reservedFlow);
+            load.setAllottedVolume(total.multiply(Dict.DAY_FLOW_TO_VOLUME).setScale(2, RoundingMode.HALF_UP));
+            load.setReservedVolume(quotaService.reservedVolume(load.getCanalSegmentId(), day));
             load.setLoadRate(design.compareTo(BigDecimal.ZERO) <= 0
-                    ? 0D : Math.min(1D, total.doubleValue() / design.doubleValue()));
-            load.setRemainFlow(design.subtract(total).setScale(2, RoundingMode.HALF_UP));
-            // 剩余可配水量：剩余流量 × 8.64（1 m³/s 放一天的来水量，万m³）
-            load.setRemainVolume(design.subtract(total).multiply(Dict.DAY_FLOW_TO_VOLUME)
+                    ? 0D : Math.min(1D, total.add(reservedFlow).doubleValue() / design.doubleValue()));
+            BigDecimal remainFlow = design.subtract(total).subtract(reservedFlow).max(BigDecimal.ZERO)
+                    .setScale(2, RoundingMode.HALF_UP);
+            load.setRemainFlow(remainFlow);
+            // 剩余可配水量：剩余流量 × 8.64（已扣已批 / 已供水申请预占）
+            load.setRemainVolume(remainFlow.multiply(Dict.DAY_FLOW_TO_VOLUME)
                     .setScale(2, RoundingMode.HALF_UP));
             vo.getDayLoads().add(load);
         }
@@ -209,18 +220,10 @@ public class PlanService {
     }
 
     /**
-     * 该渠段该日剩余可配水量（万m³）=（设计流量 − 已配流量合计）× 8.64。
-     * 用水申请模块用它核算额度，保证「申请量不得超过剩余可配水量」与配水口径一致。
+     * 该渠段该日剩余可配水量（万m³）= 日容量 − 已排配水占用 − 已批 / 已供水申请预占。
      */
     public BigDecimal remainVolume(Long segmentId, LocalDate day) {
-        CanalSegment segment = segmentRepository.findById(segmentId)
-                .orElseThrow(() -> new BizException("渠段不存在：" + segmentId));
-        BigDecimal used = CanalService.nvl(allotmentRepository.sumFlowBySegmentAndDate(segmentId, day));
-        BigDecimal remain = CanalService.nvl(segment.getDesignFlow()).subtract(used);
-        if (remain.signum() < 0) {
-            remain = BigDecimal.ZERO;
-        }
-        return remain.multiply(Dict.DAY_FLOW_TO_VOLUME).setScale(2, RoundingMode.HALF_UP);
+        return quotaService.remainVolume(segmentId, day);
     }
 
     /** 该渠段该日已配流量合计（m³/s） */
@@ -395,8 +398,10 @@ public class PlanService {
         if (request.getStatus() != null && !Dict.isValidAllotStatus(request.getStatus())) {
             throw new BizException("配水状态只能为 已排期 / 配水中 / 已完成 / 已取消");
         }
-        // 规则：同一渠段同一配水日的流量合计不得超过该渠段设计流量
-        assertDayCapacity(segment, request.getAllotDate(), request.getFlow(), null);
+        // 规则：同一渠段同一配水日的流量合计不得超过该渠段设计流量；桶锁内含已批申请预占复核
+        quotaService.lockBucket(segment.getId(), request.getAllotDate());
+        assertDayCapacity(segment, request.getAllotDate(), request.getFlow(), null,
+                !"CANCELED".equals(request.getStatus()));
 
         Allotment allotment = new Allotment();
         applyAllotment(allotment, request, segmentId, hours);
@@ -429,8 +434,29 @@ public class PlanService {
         if (request.getStatus() != null && !Dict.isValidAllotStatus(request.getStatus())) {
             throw new BizException("配水状态只能为 已排期 / 配水中 / 已完成 / 已取消");
         }
+        Set<QuotaService.BucketKey> bucketKeys = new java.util.LinkedHashSet<>();
+        bucketKeys.add(QuotaService.BucketKey.of(allotment.getCanalSegmentId(), allotment.getAllotDate()));
+        bucketKeys.add(QuotaService.BucketKey.of(segment.getId(), day));
+        quotaService.lockBuckets(bucketKeys);
+        quotaService.lockAllotment(allotment);
+        Long originalSegmentId = allotment.getCanalSegmentId();
+        LocalDate originalDay = allotment.getAllotDate();
+        // 等待行锁期间所属计划可能被批准 / 结束，按刷新后的状态重新执行锁后规则
+        plan = planRepository.findById(allotment.getPlanId()).orElse(null);
+        if (plan != null && plan.isLocked() && (request.getFlow() != null || request.getHours() != null)) {
+            throw new BizException("所属计划已" + Dict.planStatusName(plan.getStatus()) + "，不允许再改配水流量");
+        }
+        if (!java.util.Objects.equals(allotment.getCanalSegmentId(), originalSegmentId)
+                || !java.util.Objects.equals(allotment.getAllotDate(), originalDay)) {
+            throw new BizException("配水归属日期已被其他调度员修改，请刷新后重试");
+        }
+        if (request.getStatus() == null && "CANCELED".equals(allotment.getStatus())) {
+            throw new BizException("已取消的配水记录不能直接修改，请刷新后重新提交状态");
+        }
+        String newStatus = request.getStatus() != null ? request.getStatus() : allotment.getStatus();
         BigDecimal newFlow = request.getFlow() != null ? request.getFlow() : allotment.getFlow();
-        assertDayCapacity(segment, day, newFlow, allotment.getId());
+        boolean targetActive = !"CANCELED".equals(newStatus);
+        assertDayCapacity(segment, day, newFlow, allotment.getId(), targetActive);
 
         CanalService.ifNotNull(request.getPlanId(), allotment::setPlanId);
         CanalService.ifNotNull(request.getCanalSegmentId(), allotment::setCanalSegmentId);
@@ -464,7 +490,24 @@ public class PlanService {
             throw new BizException("配水日期不能晚于计划结束日 " + plan.getEndDate());
         }
         CanalSegment segment = canalService.assertCanAllot(allotment.getCanalSegmentId());
-        assertDayCapacity(segment, newDate, allotment.getFlow(), allotment.getId());
+        quotaService.lockBuckets(Set.of(
+                QuotaService.BucketKey.of(segment.getId(), allotment.getAllotDate()),
+                QuotaService.BucketKey.of(segment.getId(), newDate)));
+        quotaService.lockAllotment(allotment);
+        if ("CANCELED".equals(allotment.getStatus())) {
+            throw new BizException("已取消的配水记录不能再改期");
+        }
+        plan = planRepository.findById(allotment.getPlanId()).orElse(null);
+        if (plan != null && plan.getStartDate() != null && newDate.isBefore(plan.getStartDate())) {
+            throw new BizException("配水日期不能早于计划开始日 " + plan.getStartDate());
+        }
+        if (plan != null && plan.getEndDate() != null && newDate.isAfter(plan.getEndDate())) {
+            throw new BizException("配水日期不能晚于计划结束日 " + plan.getEndDate());
+        }
+        segment = canalService.assertCanAllot(allotment.getCanalSegmentId());
+        quotaService.lockBucket(segment.getId(), newDate);
+        boolean active = !"CANCELED".equals(allotment.getStatus());
+        assertDayCapacity(segment, newDate, allotment.getFlow(), allotment.getId(), active);
         allotment.setAllotDate(newDate);
         Allotment saved = allotmentRepository.save(allotment);
         // 与停水窗口联动：拖动改期后重扫待避让
@@ -488,27 +531,14 @@ public class PlanService {
      * 规则：同一渠段同一配水日内各条配水的流量合计不得超过该渠段设计流量。
      *
      * @param selfId 更新时排除自己；新增传 null
+     * @param targetActive 目标状态是否占用日额度（已取消不占）
      */
-    private void assertDayCapacity(CanalSegment segment, LocalDate day, BigDecimal newFlow, Long selfId) {
-        if (segment == null || day == null || newFlow == null) {
+    private void assertDayCapacity(CanalSegment segment, LocalDate day, BigDecimal newFlow,
+                                   Long selfId, boolean targetActive) {
+        if (!targetActive) {
             return;
         }
-        BigDecimal design = CanalService.nvl(segment.getDesignFlow());
-        if (design.compareTo(BigDecimal.ZERO) <= 0) {
-            throw new BizException("渠段 " + segment.getSegmentCode() + " 未设置设计流量，不能排配水");
-        }
-        BigDecimal used = BigDecimal.ZERO;
-        for (Allotment a : allotmentRepository.findActiveBySegmentAndDate(segment.getId(), day)) {
-            if (selfId != null && selfId.equals(a.getId())) {
-                continue;
-            }
-            used = used.add(CanalService.nvl(a.getFlow()));
-        }
-        if (used.add(newFlow).compareTo(design) > 0) {
-            throw new BizException("渠段 " + segment.getSegmentCode() + " " + day + " 配水流量合计 "
-                    + used.add(newFlow).setScale(2, RoundingMode.HALF_UP)
-                    + " m³/s 超过设计流量 " + design + " m³/s（该日已排 " + used.setScale(2, RoundingMode.HALF_UP) + "）");
-        }
+        quotaService.assertAllotmentFitsLocked(segment, day, newFlow, BigDecimal.ZERO, selfId, List.of());
     }
 
     /** 规则：周期结束日不得早于开始日 */

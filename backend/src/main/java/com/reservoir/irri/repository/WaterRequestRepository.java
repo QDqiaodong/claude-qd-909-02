@@ -35,6 +35,14 @@ public interface WaterRequestRepository extends JpaRepository<WaterRequest, Long
             + "and r.allotDate = :day and r.status in ('APPROVED', 'SUPPLIED')")
     java.math.BigDecimal sumApprovedVolume(@Param("segmentId") Long segmentId, @Param("day") LocalDate day);
 
+    /** 同一渠段同一用水日已批 / 已供水水量合计，批量改期预检时排除正在迁移的申请。 */
+    @Query("select coalesce(sum(r.requestVolume), 0) from WaterRequest r where r.canalSegmentId = :segmentId "
+            + "and r.allotDate = :day and r.status in ('APPROVED', 'SUPPLIED') "
+            + "and r.id not in :excludeIds")
+    java.math.BigDecimal sumApprovedVolumeExcluding(@Param("segmentId") Long segmentId,
+                                                    @Param("day") LocalDate day,
+                                                    @Param("excludeIds") List<Long> excludeIds);
+
     /** 某渠段某日可改期的用水申请（待审 / 已批；已供水、已驳回为终态不动） */
     @Query("select r from WaterRequest r where r.canalSegmentId = :segmentId "
             + "and r.allotDate = :day and r.status in ('PENDING','APPROVED')")

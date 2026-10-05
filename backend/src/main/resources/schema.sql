@@ -20,6 +20,8 @@ DROP TABLE IF EXISTS emergency_event;
 DROP TABLE IF EXISTS emergency_gate_snapshot;
 DROP TABLE IF EXISTS emergency_level_context;
 DROP TABLE IF EXISTS emergency_order;
+DROP TABLE IF EXISTS water_quota_hold;
+DROP TABLE IF EXISTS water_quota_bucket;
 DROP TABLE IF EXISTS water_request;
 DROP TABLE IF EXISTS water_user;
 DROP TABLE IF EXISTS water_level;
@@ -364,7 +366,42 @@ CREATE TABLE water_request (
     supply_time DATETIME,
     note VARCHAR(128),
     KEY idx_request_user (water_user_id),
-    KEY idx_request_segment (canal_segment_id)
+    KEY idx_request_segment (canal_segment_id),
+    KEY idx_request_quota_day (canal_segment_id, allot_date, status)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- ---------------- 用水申请额度预占 ----------------
+-- 每个「渠段 + 供水日」一行，作为审批、退回、供水中和配水调整的数据库行级串行点。
+-- 桶内不保存剩余量；容量、已排配水和申请预占均实时汇总，避免冗余数字与业务状态不一致。
+CREATE TABLE water_quota_bucket (
+    canal_segment_id BIGINT NOT NULL,
+    allot_date DATE NOT NULL,
+    PRIMARY KEY (canal_segment_id, allot_date),
+    KEY idx_quota_bucket_day (allot_date)
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- 已批申请的可追溯额度流水：HELD 预占，CONSUMED 已供水入账，RELEASED 退回 / 驳回释放。
+-- 流水只追加、不物理删除；同一申请只有最新一条 HELD 生效，终态流水保留完整审计。
+CREATE TABLE water_quota_hold (
+    id BIGINT AUTO_INCREMENT PRIMARY KEY,
+    water_request_id BIGINT NOT NULL,
+    request_no VARCHAR(32) NOT NULL,
+    canal_segment_id BIGINT NOT NULL,
+    allot_date DATE NOT NULL,
+    hold_volume DECIMAL(12,2) NOT NULL,
+    status VARCHAR(16) NOT NULL,
+    held_by VARCHAR(32),
+    held_at DATETIME,
+    released_by VARCHAR(32),
+    released_at DATETIME,
+    release_reason VARCHAR(256),
+    consumed_at DATETIME,
+    created_at DATETIME NOT NULL,
+    updated_at DATETIME NOT NULL,
+    active_request_id BIGINT GENERATED ALWAYS AS (CASE WHEN status = 'HELD' THEN water_request_id ELSE NULL END) STORED,
+    UNIQUE KEY uk_quota_hold_active (active_request_id),
+    KEY idx_quota_hold_request (water_request_id, id),
+    KEY idx_quota_hold_day (canal_segment_id, allot_date, status)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =====================================================================

@@ -81,9 +81,13 @@ function planResolved(planId) {
 }
 
 function cellTitle(segmentId, date) {
-  const ws = cellWindows(segmentId, date)
-  if (!ws.length) return null
-  return ws.map((w) => `停水窗口 ${w.windowNo}（${w.scopeTypeName}）：${w.reason}`).join('\n')
+  const lines = cellWindows(segmentId, date)
+    .map((w) => `停水窗口 ${w.windowNo}（${w.scopeTypeName}）：${w.reason}`)
+  const load = cellLoad(segmentId, date)
+  if (load) {
+    lines.push(`已排配水 ${load.allottedVolume || 0} 万m³（${load.totalFlow} m³/s），已批申请预占 ${load.reservedVolume || 0} 万m³，剩余 ${load.remainVolume} 万m³`)
+  }
+  return lines.length ? lines.join('\n') : null
 }
 
 function barTitle(a) {
@@ -122,7 +126,7 @@ function cellLoad(segmentId, date) {
 function overDesign(segmentId, date) {
   const load = cellLoad(segmentId, date)
   if (!load) return false
-  const total = Number(load.totalFlow || 0)
+  const total = Number(load.totalFlow || 0) + Number(load.reservedFlow || 0)
   const design = Number(load.designFlow || 0)
   return design > 0 && total > design
 }

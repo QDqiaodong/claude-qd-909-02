@@ -132,6 +132,7 @@ const user = {
   remove: (id) => call(http.delete(`/user/${id}`)),
   createRequest: (data) => call(http.post('/user/request', data)),
   request: (id) => call(http.get(`/user/request/${id}`)),
+  holds: (id) => call(http.get(`/user/request/${id}/holds`)),
   advance: (id, approver) => call(http.post(`/user/request/${id}/advance`, null, { params: { approver } })),
   reject: (id, approver, reason) => call(http.post(`/user/request/${id}/reject`, null, { params: { approver, reason } })),
   backToPending: (id) => call(http.post(`/user/request/${id}/pending`)),

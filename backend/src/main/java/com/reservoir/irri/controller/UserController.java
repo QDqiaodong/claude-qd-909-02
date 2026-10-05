@@ -1,6 +1,7 @@
 package com.reservoir.irri.controller;
 
 import com.reservoir.irri.common.ApiResponse;
+import com.reservoir.irri.domain.WaterQuotaHold;
 import com.reservoir.irri.domain.WaterRequest;
 import com.reservoir.irri.domain.WaterUser;
 import com.reservoir.irri.dto.Views.RequestVO;
@@ -111,6 +112,12 @@ public class UserController {
     @GetMapping("/request/{id}")
     public ApiResponse<WaterRequest> request(@PathVariable Long id) {
         return ApiResponse.success(service.getRequest(id));
+    }
+
+    /** 额度预占 / 释放 / 入账审计流水 */
+    @GetMapping("/request/{id}/holds")
+    public ApiResponse<List<WaterQuotaHold>> requestHolds(@PathVariable Long id) {
+        return ApiResponse.success(service.requestQuotaHolds(id));
     }
 
     @DeleteMapping("/request/{id}")

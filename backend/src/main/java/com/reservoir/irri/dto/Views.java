@@ -234,9 +234,17 @@ public final class Views {
         private BigDecimal totalFlow = BigDecimal.ZERO;
         private BigDecimal designFlow = BigDecimal.ZERO;
         private Double loadRate = 0D;
-        /** 剩余可配流量（m³/s） */
+        /** 剩余可配流量（m³/s，已扣已批申请预占） */
         private BigDecimal remainFlow = BigDecimal.ZERO;
-        /** 剩余可配水量（万m³）= 剩余流量 × 8.64 */
+        /** 已批 / 已供水申请预占折算流量（m³/s） */
+        private BigDecimal reservedFlow = BigDecimal.ZERO;
+        /** 该渠段该日总容量（万m³） */
+        private BigDecimal dayCapacity = BigDecimal.ZERO;
+        /** 已排配水折算全日水量（万m³） */
+        private BigDecimal allottedVolume = BigDecimal.ZERO;
+        /** 已批 / 已供水申请预占水量（万m³） */
+        private BigDecimal reservedVolume = BigDecimal.ZERO;
+        /** 剩余可配水量（万m³）= 日容量 − 已排配水 − 已批申请预占 */
         private BigDecimal remainVolume = BigDecimal.ZERO;
     }
 
@@ -567,10 +575,22 @@ public final class Views {
         private String approveTime;
         private String supplyTime;
         private String note;
-        /** 该渠段该日剩余可配水量（万m³） */
+        /** 该渠段该日总容量（万m³） */
+        private BigDecimal dayCapacity = BigDecimal.ZERO;
+        /** 该渠段该日剩余可配水量（万m³，已扣除已排配水与已批申请预占） */
         private BigDecimal remainVolume = BigDecimal.ZERO;
-        /** 申请量占剩余额度比例 0~1 */
+        /** 申请量占当日总容量比例 0~1 */
         private Double quotaRate = 0D;
+        /** 最新额度预占流水 ID；历史申请可能为空，但仍按申请状态计入额度 */
+        private Long quotaHoldId;
+        /** HELD 已预占 / CONSUMED 已随供水入账 / RELEASED 已释放 */
+        private String quotaHoldStatus;
+        private String quotaHeldBy;
+        private String quotaHeldAt;
+        private String quotaReleasedBy;
+        private String quotaReleasedAt;
+        private String quotaReleaseReason;
+        private String quotaConsumedAt;
     }
 
     // ---------------- 统计 ----------------

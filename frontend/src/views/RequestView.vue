@@ -12,6 +12,8 @@ const segments = ref([])
 const loading = ref(false)
 const segmentFilter = ref(null)
 const dialog = ref(false)
+const holdDialog = ref(false)
+const holdRows = ref([])
 const form = ref({
   requestNo: '',
   waterUserId: null,
@@ -127,6 +129,22 @@ async function backToPending(row) {
   }
 }
 
+async function showHolds(row) {
+  loading.value = true
+  try {
+    holdRows.value = await api.user.holds(row.id)
+    holdDialog.value = true
+  } catch (e) {
+    ElMessage.error(e.message)
+  } finally {
+    loading.value = false
+  }
+}
+
+function holdStatusName(status) {
+  return { HELD: '已预占', CONSUMED: '已供水入账', RELEASED: '已释放' }[status] || status
+}
+
 async function load() {
   loading.value = true
   try {
@@ -157,7 +175,7 @@ onMounted(load)
   <div>
     <div class="view-head">
       <span class="view-title">用水申请 · 三列审批流</span>
-      <span class="view-tip">待审 → 已批 → 已供水，驳回需填理由；终态（已供水 / 已驳回）不再推进</span>
+      <span class="view-tip">待审 / 驳回不占额度；批准即在「渠段 + 供水日」原子预占，退回待审释放；终态审计不可重复释放</span>
     </div>
 
     <div class="chip-row">
@@ -196,7 +214,22 @@ onMounted(load)
             <div class="quota-bar" :class="{ full: r.quotaRate >= 1 }">
               <i :style="{ width: Math.min(100, (r.quotaRate || 0) * 100).toFixed(1) + '%' }"></i>
             </div>
-            <span class="quota-text">占剩余额度 {{ ((r.quotaRate || 0) * 100).toFixed(0) }}%（剩 {{ r.remainVolume }} 万m³）</span>
+            <span class="quota-text">
+              占当日容量 {{ ((r.quotaRate || 0) * 100).toFixed(0) }}%（已扣已排配水与已批申请，剩 {{ r.remainVolume }} 万m³）
+            </span>
+            <span v-if="r.quotaHoldStatus" class="quota-audit">
+              {{ r.quotaHoldStatus === 'HELD' ? `额度已预占 · ${r.quotaHeldBy || '—'} · ${r.quotaHeldAt || '—'}` : '' }}
+              <template v-if="r.quotaHoldStatus === 'CONSUMED'">预占已随供水入账 · {{ r.quotaConsumedAt || '—' }}</template>
+              <template v-if="r.quotaHoldStatus === 'RELEASED'">预占已释放 · {{ r.quotaReleaseReason || '—' }}</template>
+            </span>
+            <el-button
+              v-if="r.quotaHoldId"
+              class="quota-history-btn"
+              link
+              type="primary"
+              size="small"
+              @click="showHolds(r)"
+            >额度流水</el-button>
           </div>
           <div v-if="r.rejectReason" class="rc-reject">驳回理由：{{ r.rejectReason }}</div>
           <div class="rc-actions">
@@ -256,6 +289,25 @@ onMounted(load)
         <el-button type="primary" :loading="loading" @click="submitCreate">提交申请</el-button>
       </template>
     </el-dialog>
+
+    <el-dialog v-model="holdDialog" title="额度预占审计流水" width="720px">
+      <el-table :data="holdRows" size="small" border>
+        <el-table-column prop="id" label="ID" width="70" />
+        <el-table-column label="状态" width="110">
+          <template #default="scope">{{ holdStatusName(scope.row.status) }}</template>
+        </el-table-column>
+        <el-table-column prop="holdVolume" label="水量（万m³）" width="120" />
+        <el-table-column prop="heldBy" label="预占人" width="100" />
+        <el-table-column prop="heldAt" label="预占时间" width="170" />
+        <el-table-column prop="releasedBy" label="释放人" width="100" />
+        <el-table-column prop="releasedAt" label="释放时间" width="170" />
+        <el-table-column prop="releaseReason" label="释放原因" min-width="180" />
+        <el-table-column prop="consumedAt" label="入账时间" width="170" />
+      </el-table>
+      <template #footer>
+        <el-button @click="holdDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
@@ -290,7 +342,9 @@ onMounted(load)
 .quota-bar { height: 5px; border-radius: 4px; background: #e3f2fd; overflow: hidden; }
 .quota-bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #4fc3f7, var(--primary)); }
 .quota-bar.full i { background: linear-gradient(90deg, #f9a825, #e53935); }
-.quota-text { font-size: 10.5px; color: var(--ink-dim); }
+.quota-text { display: block; font-size: 10.5px; color: var(--ink-dim); }
+.quota-audit { display: block; margin-top: 2px; font-size: 10px; color: #01579b; }
+.quota-history-btn { height: 18px; margin-top: 2px; padding: 0; font-size: 10px; }
 .rc-reject {
   margin-top: 6px; padding: 5px 8px; border-radius: 7px; font-size: 11px;
   color: #b71c1c; background: #ffebee; border: 1px solid #ffcdd2;
