@@ -346,6 +346,9 @@ CREATE TABLE water_user (
 -- ---------------- 用水申请 ----------------
 -- request_volume 申请水量（万m³），不得超过该渠段该日剩余可配水量
 -- status：PENDING 待审 / APPROVED 已批 / SUPPLIED 已供水 / REJECTED 已驳回（后两者为终态）
+-- quota_reserved 额度预占标记：批准时置 1 并记 reserved_at，退回待审 / 驳回已批时置 0 并记 released_at；
+--   已供水终态保留预占与审计信息，不再释放；待审与已驳回不占额度；
+--   历史数据该标记为 0 时按 status（已批 / 已供水）计入额度，保证老数据照常统计
 CREATE TABLE water_request (
     id BIGINT AUTO_INCREMENT PRIMARY KEY,
     request_no VARCHAR(32) NOT NULL UNIQUE,
@@ -362,9 +365,13 @@ CREATE TABLE water_request (
     apply_time DATETIME,
     approve_time DATETIME,
     supply_time DATETIME,
+    quota_reserved TINYINT(1) NOT NULL DEFAULT 0,
+    reserved_at DATETIME,
+    released_at DATETIME,
     note VARCHAR(128),
     KEY idx_request_user (water_user_id),
-    KEY idx_request_segment (canal_segment_id)
+    KEY idx_request_segment (canal_segment_id),
+    KEY idx_request_quota (canal_segment_id, allot_date)
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
 
 -- =====================================================================

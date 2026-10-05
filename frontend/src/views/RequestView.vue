@@ -198,6 +198,10 @@ onMounted(load)
             </div>
             <span class="quota-text">占剩余额度 {{ ((r.quotaRate || 0) * 100).toFixed(0) }}%（剩 {{ r.remainVolume }} 万m³）</span>
           </div>
+          <div v-if="r.quotaReserved" class="rc-reserve">
+            额度已预占<template v-if="r.reservedAt"> · {{ r.reservedAt }}</template>
+          </div>
+          <div v-else-if="r.releasedAt" class="rc-release">预占已释放 · {{ r.releasedAt }}</div>
           <div v-if="r.rejectReason" class="rc-reject">驳回理由：{{ r.rejectReason }}</div>
           <div class="rc-actions">
             <template v-if="r.status === 'PENDING'">
@@ -291,6 +295,14 @@ onMounted(load)
 .quota-bar i { display: block; height: 100%; border-radius: 4px; background: linear-gradient(90deg, #4fc3f7, var(--primary)); }
 .quota-bar.full i { background: linear-gradient(90deg, #f9a825, #e53935); }
 .quota-text { font-size: 10.5px; color: var(--ink-dim); }
+.rc-reserve {
+  margin-top: 6px; padding: 4px 8px; border-radius: 7px; font-size: 11px;
+  color: #01579b; background: #e1f5fe; border: 1px solid #b3e5fc;
+}
+.rc-release {
+  margin-top: 6px; padding: 4px 8px; border-radius: 7px; font-size: 11px;
+  color: #546e7a; background: #eceff1; border: 1px solid #cfd8dc;
+}
 .rc-reject {
   margin-top: 6px; padding: 5px 8px; border-radius: 7px; font-size: 11px;
   color: #b71c1c; background: #ffebee; border: 1px solid #ffcdd2;

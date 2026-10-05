@@ -567,10 +567,16 @@ public final class Views {
         private String approveTime;
         private String supplyTime;
         private String note;
-        /** 该渠段该日剩余可配水量（万m³） */
+        /** 该渠段该日剩余可配水量（万m³）：已同时扣除已排配水与已批准申请的额度预占 */
         private BigDecimal remainVolume = BigDecimal.ZERO;
         /** 申请量占剩余额度比例 0~1 */
         private Double quotaRate = 0D;
+        /** 当前是否占用该渠段该日额度（已批 / 已供水；含按状态计入的历史数据） */
+        private Boolean quotaReserved = Boolean.FALSE;
+        /** 额度预占时间（批准时刻）；历史数据可能为空 */
+        private String reservedAt;
+        /** 最近一次预占释放时间（退回待审 / 驳回已批） */
+        private String releasedAt;
     }
 
     // ---------------- 统计 ----------------

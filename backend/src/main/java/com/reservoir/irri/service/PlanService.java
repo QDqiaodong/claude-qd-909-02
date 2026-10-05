@@ -15,6 +15,7 @@ import com.reservoir.irri.dto.Views.PlanVO;
 import com.reservoir.irri.repository.AllotmentRepository;
 import com.reservoir.irri.repository.CanalSegmentRepository;
 import com.reservoir.irri.repository.IrrigationPlanRepository;
+import com.reservoir.irri.repository.WaterRequestRepository;
 import java.math.BigDecimal;
 import java.math.RoundingMode;
 import java.time.LocalDate;
@@ -49,15 +50,17 @@ public class PlanService {
     private final IrrigationPlanRepository planRepository;
     private final AllotmentRepository allotmentRepository;
     private final CanalSegmentRepository segmentRepository;
+    private final WaterRequestRepository requestRepository;
     private final CanalService canalService;
     private final OutageService outageService;
 
     public PlanService(IrrigationPlanRepository planRepository, AllotmentRepository allotmentRepository,
-                       CanalSegmentRepository segmentRepository, CanalService canalService,
-                       OutageService outageService) {
+                       CanalSegmentRepository segmentRepository, WaterRequestRepository requestRepository,
+                       CanalService canalService, OutageService outageService) {
         this.planRepository = planRepository;
         this.allotmentRepository = allotmentRepository;
         this.segmentRepository = segmentRepository;
+        this.requestRepository = requestRepository;
         this.canalService = canalService;
         this.outageService = outageService;
     }
@@ -209,8 +212,10 @@ public class PlanService {
     }
 
     /**
-     * 该渠段该日剩余可配水量（万m³）=（设计流量 − 已配流量合计）× 8.64。
+     * 该渠段该日剩余可配水量（万m³）=（设计流量 − 已配流量合计）× 8.64 − 已批准申请的额度预占。
      * 用水申请模块用它核算额度，保证「申请量不得超过剩余可配水量」与配水口径一致。
+     * 已批 / 已供水申请形成额度预占（quota_reserved，历史数据无标记时按状态计入），
+     * 待审与已驳回申请不占额度；申请卡片、审批提示与额度查询都走这里，口径一致。
      */
     public BigDecimal remainVolume(Long segmentId, LocalDate day) {
         CanalSegment segment = segmentRepository.findById(segmentId)
@@ -220,7 +225,13 @@ public class PlanService {
         if (remain.signum() < 0) {
             remain = BigDecimal.ZERO;
         }
-        return remain.multiply(Dict.DAY_FLOW_TO_VOLUME).setScale(2, RoundingMode.HALF_UP);
+        // 同时扣除该渠段该日已批准（含已供水）用水申请的额度预占
+        BigDecimal reserved = CanalService.nvl(requestRepository.sumReservedVolume(segmentId, day));
+        BigDecimal volume = remain.multiply(Dict.DAY_FLOW_TO_VOLUME).subtract(reserved);
+        if (volume.signum() < 0) {
+            volume = BigDecimal.ZERO;
+        }
+        return volume.setScale(2, RoundingMode.HALF_UP);
     }
 
     /** 该渠段该日已配流量合计（m³/s） */

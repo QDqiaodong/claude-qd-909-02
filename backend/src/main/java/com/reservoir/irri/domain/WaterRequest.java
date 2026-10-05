@@ -16,6 +16,10 @@ import lombok.Setter;
 /**
  * 用水申请：农户按渠段按日期申请配水量，走「待审 → 已批 → 已供水 / 已驳回」三列审批流。
  * 驳回必须填理由；已供水 / 已驳回为终态。
+ *
+ * <p>额度预占：批准即按「渠段 + 用水日」形成可追溯的额度预占（quota_reserved = 1，记 reserved_at），
+ * 退回待审 / 驳回已批时释放（quota_reserved = 0，记 released_at）；已供水终态保留预占与审计信息。
+ * 历史数据没有预占标记（quota_reserved = 0）时，按已批 / 已供水状态计入额度。
  */
 @Entity
 @Table(name = "water_request")
@@ -83,11 +87,29 @@ public class WaterRequest {
     @Column(name = "supply_time")
     private LocalDateTime supplyTime;
 
+    /** 额度预占标记：已批 / 已供水占 1；待审 / 已驳回为 0。历史数据为 0 时按状态计入额度 */
+    @Column(name = "quota_reserved", nullable = false)
+    private Boolean quotaReserved = Boolean.FALSE;
+
+    /** 额度预占时间（批准时刻）；历史数据可能为空 */
+    @Column(name = "reserved_at")
+    private LocalDateTime reservedAt;
+
+    /** 最近一次释放预占时间（退回待审 / 驳回已批）；已供水终态保留不清 */
+    @Column(name = "released_at")
+    private LocalDateTime releasedAt;
+
     @Column(name = "note", length = 128)
     private String note;
 
     @Transient
     public boolean isTerminal() {
         return com.reservoir.irri.common.Dict.isTerminalRequestStatus(status);
+    }
+
+    /** 当前是否占用该渠段该日额度：预占标记为 1，或无标记的历史已批 / 已供水申请 */
+    @Transient
+    public boolean isQuotaOccupying() {
+        return Boolean.TRUE.equals(quotaReserved) || "APPROVED".equals(status) || "SUPPLIED".equals(status);
     }
 }

@@ -34,6 +34,10 @@ import org.springframework.util.StringUtils;
  *   <li>状态流转：待审 → 已批 → 已供水 / 已驳回，已供水与已驳回为终态</li>
  *   <li>驳回必须填理由</li>
  *   <li>欠费停供（ARREAR）用户不允许提交申请；停用渠段不允许申请</li>
+ *   <li>额度预占：批准即按「渠段 + 用水日」预占额度（quota_reserved，记 reserved_at），
+ *       退回待审 / 驳回已批时释放（记 released_at）；已供水终态保留预占与审计信息不再释放；
+ *       待审与已驳回不占额度。审批在申请行锁 + 渠段行锁内核额，
+ *       两个调度员并发审批时只有仍能容纳的申请才会通过</li>
  * </ol>
  */
 @Service
@@ -247,8 +251,9 @@ public class WaterUserService {
         req.setApplyAreaMu(request.getApplyAreaMu() == null ? user.getIrrigatedAreaMu() : request.getApplyAreaMu());
         req.setUrgency(request.getUrgency() == null ? "NORMAL" : request.getUrgency());
         req.setNote(request.getNote());
-        // 默认值写在 create 里
+        // 默认值写在 create 里：待审申请不占额度，批准时才形成预占
         req.setStatus("PENDING");
+        req.setQuotaReserved(false);
         req.setApplyTime(LocalDateTime.now());
         return requestRepository.save(req);
     }
@@ -256,12 +261,17 @@ public class WaterUserService {
     /** 推进：待审 → 已批 → 已供水 */
     @Transactional
     public WaterRequest advance(Long id, String approver) {
-        WaterRequest req = getRequest(id);
+        // 锁申请行：两个调度员并发操作同一申请时串行，状态判断基于最新提交
+        WaterRequest req = requestRepository.findForUpdate(id)
+                .orElseThrow(() -> new BizException("用水申请不存在：" + id));
         if (req.isTerminal()) {
             throw new BizException("申请已" + Dict.requestStatusName(req.getStatus()) + "，为终态，不能继续推进");
         }
         if ("PENDING".equals(req.getStatus())) {
-            // 批准时再核一次额度，防止排队期间该渠段该日已被占满
+            // 锁渠段行：并发审批同一渠段同一供水日的申请在此串行；
+            // 锁内重算剩余（已排配水 + 已批准预占），只有仍能容纳的申请才通过
+            segmentRepository.findForUpdate(req.getCanalSegmentId())
+                    .orElseThrow(() -> new BizException("渠段不存在：" + req.getCanalSegmentId()));
             BigDecimal remain = planService.remainVolume(req.getCanalSegmentId(), req.getAllotDate());
             if (req.getRequestVolume().compareTo(remain) > 0) {
                 throw new BizException("该渠段 " + req.getAllotDate() + " 剩余可配水量仅剩 " + remain
@@ -270,24 +280,34 @@ public class WaterUserService {
             req.setStatus("APPROVED");
             req.setApprover(approver == null ? "灌区调度" : approver);
             req.setApproveTime(LocalDateTime.now());
+            // 批准即形成可追溯的额度预占
+            req.setQuotaReserved(true);
+            req.setReservedAt(LocalDateTime.now());
         } else if ("APPROVED".equals(req.getStatus())) {
             canalService.assertCanAllot(req.getCanalSegmentId());
             req.setStatus("SUPPLIED");
             req.setSupplyTime(LocalDateTime.now());
+            // 已供水为终态：额度预占与审计信息保留不再释放；历史数据补记预占标记
+            req.setQuotaReserved(true);
+            if (req.getReservedAt() == null) {
+                req.setReservedAt(req.getApproveTime() == null ? LocalDateTime.now() : req.getApproveTime());
+            }
         }
         return requestRepository.save(req);
     }
 
-    /** 驳回：必须填理由 */
+    /** 驳回：必须填理由；驳回已批申请时一并释放其额度预占 */
     @Transactional
     public WaterRequest reject(Long id, String approver, String reason) {
-        WaterRequest req = getRequest(id);
+        WaterRequest req = requestRepository.findForUpdate(id)
+                .orElseThrow(() -> new BizException("用水申请不存在：" + id));
         if (req.isTerminal()) {
             throw new BizException("申请已" + Dict.requestStatusName(req.getStatus()) + "，为终态，不能驳回");
         }
         if (!StringUtils.hasText(reason)) {
             throw new BizException("驳回必须填写理由");
         }
+        releaseQuota(req);
         req.setStatus("REJECTED");
         req.setRejectReason(reason);
         req.setApprover(approver == null ? "灌区调度" : approver);
@@ -295,18 +315,31 @@ public class WaterUserService {
         return requestRepository.save(req);
     }
 
-    /** 退回待审（仅已批可退） */
+    /** 退回待审（仅已批可退）：释放额度预占 */
     @Transactional
     public WaterRequest backToPending(Long id) {
-        WaterRequest req = getRequest(id);
+        WaterRequest req = requestRepository.findForUpdate(id)
+                .orElseThrow(() -> new BizException("用水申请不存在：" + id));
         if (!"APPROVED".equals(req.getStatus())) {
             throw new BizException("只有已批（APPROVED）的申请可以退回待审，当前为 "
                     + Dict.requestStatusName(req.getStatus()));
         }
+        releaseQuota(req);
         req.setStatus("PENDING");
         req.setApprover(null);
         req.setApproveTime(null);
         return requestRepository.save(req);
+    }
+
+    /**
+     * 释放额度预占：仅当前持有预占（已批，含按状态占额度的历史数据）的申请需要释放；
+     * 预占 / 释放时间保留为审计痕迹。已供水等终态不会走到这里，不会被重复释放。
+     */
+    private void releaseQuota(WaterRequest req) {
+        if (req.isQuotaOccupying()) {
+            req.setQuotaReserved(false);
+            req.setReleasedAt(LocalDateTime.now());
+        }
     }
 
     @Transactional
@@ -365,6 +398,10 @@ public class WaterUserService {
         vo.setApproveTime(CanalService.str(req.getApproveTime()));
         vo.setSupplyTime(CanalService.str(req.getSupplyTime()));
         vo.setNote(req.getNote());
+        // 额度预占痕迹：卡片上可追溯（历史数据无标记时按状态计入）
+        vo.setQuotaReserved(Boolean.valueOf(req.isQuotaOccupying()));
+        vo.setReservedAt(CanalService.str(req.getReservedAt()));
+        vo.setReleasedAt(CanalService.str(req.getReleasedAt()));
         BigDecimal remain = BigDecimal.ZERO;
         try {
             remain = planService.remainVolume(req.getCanalSegmentId(), req.getAllotDate());
